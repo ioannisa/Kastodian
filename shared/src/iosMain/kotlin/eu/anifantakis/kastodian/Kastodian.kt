@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
+import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
@@ -15,6 +16,7 @@ import dev.whyoleg.cryptography.providers.openssl3.Openssl3
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -219,7 +221,7 @@ actual class Kastodian {
         return json.decodeFromString(serializer<T>(), jsonString)
     }
 
-    suspend inline fun <reified T> get(key: String, defaultValue: T, encrypted: Boolean = true): T {
+    actual suspend inline fun <reified T> get(key: String, defaultValue: T, encrypted: Boolean): T {
         return if (encrypted) {
             getEncrypted(key, defaultValue)
         }
@@ -234,7 +236,7 @@ actual class Kastodian {
         }
     }
 
-    suspend inline fun <reified T> put(key: String, value: T, encrypted: Boolean = true) {
+    actual suspend inline fun <reified T> put(key: String, value: T, encrypted: Boolean) {
         if (encrypted) {
             putEncrypted(key, value)
         } else {
@@ -245,6 +247,30 @@ actual class Kastodian {
     actual inline fun <reified T> putDirect(key: String, value: T, encrypted: Boolean): Unit {
         CoroutineScope(Dispatchers.Default + SupervisorJob()).launch {
             put(key, value, encrypted)
+        }
+    }
+
+    /**
+     * Deletes a value from DataStore.
+     *
+     * @param key The key of the value to delete.
+     */
+    actual suspend fun delete(key: String) {
+        val dataKey = stringPreferencesKey(key)
+        dataStore.edit { preferences ->
+            preferences.remove(dataKey)
+        }
+    }
+
+    /**
+     * Deletes a value from DataStore without using coroutines.
+     * This function is **non-blocking**.
+     *
+     * @param key The key of the value to delete.
+     */
+    actual fun deleteDirect(key: String) {
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            delete(key)
         }
     }
 }

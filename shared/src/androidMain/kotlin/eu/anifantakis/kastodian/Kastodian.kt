@@ -182,7 +182,7 @@ actual class Kastodian(private val context: Context) {
         return json.decodeFromString(serializer<T>(), jsonString)
     }
 
-    suspend inline fun <reified T> get(key: String, defaultValue: T, encrypted: Boolean = true): T {
+    actual suspend inline fun <reified T> get(key: String, defaultValue: T, encrypted: Boolean): T {
         return if (encrypted) {
             getEncrypted(key, defaultValue)
         } else {
@@ -196,7 +196,7 @@ actual class Kastodian(private val context: Context) {
         }
     }
 
-    suspend inline fun <reified T> put(key: String, value: T, encrypted: Boolean = true) {
+    actual suspend inline fun <reified T> put(key: String, value: T, encrypted: Boolean) {
         if (encrypted) {
             putEncrypted(key, value)
         } else {
@@ -207,6 +207,30 @@ actual class Kastodian(private val context: Context) {
     actual inline fun <reified T> putDirect(key: String, value: T, encrypted: Boolean) {
         CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             put(key, value, encrypted)
+        }
+    }
+
+    /**
+     * Deletes a value from DataStore.
+     *
+     * @param key The key of the value to delete.
+     */
+    actual suspend fun delete(key: String) {
+        val dataKey = stringPreferencesKey(key)
+        dataStore.edit { preferences ->
+            preferences.remove(dataKey)
+        }
+    }
+
+    /**
+     * Deletes a value from DataStore without using coroutines.
+     * This function is **non-blocking**.
+     *
+     * @param key The key of the value to delete.
+     */
+    actual fun deleteDirect(key: String) {
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            delete(key)
         }
     }
 }
