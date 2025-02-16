@@ -1,22 +1,65 @@
 package eu.anifantakis.kastodian
 
-import platform.Foundation.*
-import androidx.datastore.preferences.core.*
-import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
+import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import dev.whyoleg.cryptography.CryptographyProvider
+import dev.whyoleg.cryptography.algorithms.AES
+import dev.whyoleg.cryptography.providers.openssl3.Openssl3
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
 import okio.Path.Companion.toPath
+import platform.Foundation.NSDocumentDirectory
+import platform.Foundation.NSFileManager
+import platform.Foundation.NSURL
+import platform.Foundation.NSUserDomainMask
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
+
+@OptIn(ExperimentalEncodingApi::class)
+private fun encodeBase64(bytes: ByteArray): String = Base64.encode(bytes)
+
+@OptIn(ExperimentalEncodingApi::class)
+private fun decodeBase64(encoded: String): ByteArray = Base64.decode(encoded)
 
 actual class Kastodian {
+
+    init {
+        // Force registration of the Apple provider.
+        registerAppleProvider()
+        forceAesGcmRegistration()
+    }
+
+    private fun registerAppleProvider() {
+        // This explicitly registers the Apple provider with the default CryptographyProvider.
+        CryptographyProvider.Openssl3
+    }
+
+    private fun forceAesGcmRegistration() {
+        // Dummy reference to ensure AES.GCM is not stripped.
+        @Suppress("UNUSED_VARIABLE")
+        val dummy = AES.GCM
+    }
 
     @PublishedApi
     internal val json = Json { ignoreUnknownKeys = true }
 
+    // Create DataStore using a file in the app's Documents directory.
     @OptIn(ExperimentalForeignApi::class)
     @PublishedApi
     internal val dataStore: DataStore<Preferences> = PreferenceDataStoreFactory.createWithPath(
@@ -33,6 +76,7 @@ actual class Kastodian {
         }
     )
 
+    // ----- Unencrypted Storage Functions -----
     @PublishedApi
     internal suspend inline fun <reified T> getUnencrypted(key: String, defaultValue: T): T {
         val preferencesKey: Preferences.Key<Any> = when (defaultValue) {
@@ -105,9 +149,7 @@ actual class Kastodian {
                 }
             }
             is String -> value
-            else -> {
-                json.encodeToString(serializer<T>(), value)
-            }
+            else -> json.encodeToString(serializer<T>(), value)
         }
 
         dataStore.updateData { preferences ->
@@ -117,8 +159,73 @@ actual class Kastodian {
         }
     }
 
+    // ----- Encrypted Storage Functions -----
+    private fun symmetricPrefKey(id: String) = stringPreferencesKey("symmetric_$id")
+    private fun encryptedPrefKey(key: String) = stringPreferencesKey("encrypted_$key")
+
+    suspend fun getOrCreateSymmetricKey(id: String, aesGcm: AES.GCM): AES.GCM.Key {
+        val storedKeyBase64: String? = dataStore.data.map { it[symmetricPrefKey(id)] }.first()
+        return if (storedKeyBase64 != null) {
+            val encoded = decodeBase64(storedKeyBase64)
+            aesGcm.keyDecoder().decodeFromByteArray(AES.Key.Format.RAW, encoded)
+        } else {
+            val newKey = aesGcm.keyGenerator(AES.Key.Size.B256).generateKey()
+            val newKeyEncoded = newKey.encodeToByteArray(AES.Key.Format.RAW)
+            val encodedKeyBase64 = encodeBase64(newKeyEncoded)
+            dataStore.updateData { preferences ->
+                preferences.toMutablePreferences().apply {
+                    this[symmetricPrefKey(id)] = encodedKeyBase64
+                }
+            }
+            newKey
+        }
+    }
+
+    suspend fun storeEncryptedData(key: String, data: ByteArray) {
+        val encoded = encodeBase64(data)
+        dataStore.updateData { preferences ->
+            preferences.toMutablePreferences().apply {
+                this[encryptedPrefKey(key)] = encoded
+            }
+        }
+    }
+
+    suspend fun loadEncryptedData(key: String): ByteArray? {
+        val stored = dataStore.data.map { it[encryptedPrefKey(key)] }.first()
+        return stored?.let { decodeBase64(it) }
+    }
+
+    suspend inline fun <reified T> putEncrypted(key: String, value: T) {
+        val jsonString = json.encodeToString(value)
+        val plaintext = jsonString.encodeToByteArray()
+
+        // Use our non-inline helper to obtain AES-GCM.
+        val aesGcm = obtainAesGcm()
+        val symmetricKey = getOrCreateSymmetricKey(key, aesGcm)
+        val cipher = symmetricKey.cipher()
+        val ciphertext = cipher.encrypt(plaintext = plaintext)
+
+        storeEncryptedData(key, ciphertext)
+    }
+
+    suspend inline fun <reified T> getEncrypted(key: String, defaultValue: T): T {
+        val ciphertext = loadEncryptedData(key) ?: return defaultValue
+        // Use our non-inline helper to obtain AES-GCM.
+        val aesGcm = obtainAesGcm()
+        val symmetricKey = getOrCreateSymmetricKey(key, aesGcm)
+        val cipher = symmetricKey.cipher()
+        val decryptedBytes = cipher.decrypt(ciphertext = ciphertext)
+        val jsonString = decryptedBytes.decodeToString()
+        return json.decodeFromString(serializer<T>(), jsonString)
+    }
+
     suspend inline fun <reified T> get(key: String, defaultValue: T, encrypted: Boolean = true): T {
-        return getUnencrypted(key, defaultValue)
+        return if (encrypted) {
+            getEncrypted(key, defaultValue)
+        }
+        else {
+            getUnencrypted(key, defaultValue)
+        }
     }
 
     actual inline fun <reified T> getDirect(key: String, defaultValue: T, encrypted: Boolean): T {
@@ -128,12 +235,21 @@ actual class Kastodian {
     }
 
     suspend inline fun <reified T> put(key: String, value: T, encrypted: Boolean = true) {
-        putUnencrypted(key, value)
+        if (encrypted) {
+            putEncrypted(key, value)
+        } else {
+            putUnencrypted(key, value)
+        }
     }
 
-    actual inline fun <reified T> putDirect(key: String, value: T, encrypted: Boolean) {
+    actual inline fun <reified T> putDirect(key: String, value: T, encrypted: Boolean): Unit {
         CoroutineScope(Dispatchers.Default + SupervisorJob()).launch {
             put(key, value, encrypted)
         }
     }
+}
+
+// iOS: non-inline helper to get the AES-GCM algorithm instance.
+fun obtainAesGcm(): AES.GCM {
+    return CryptographyProvider.Openssl3.get(AES.GCM)
 }

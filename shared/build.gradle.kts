@@ -41,13 +41,23 @@ kotlin {
     sourceSets {
         androidMain.dependencies {
               // data store preferences
+            implementation(cryptographyLibs.provider.jdk)
+
         }
         commonMain.dependencies {
             //put your multiplatform dependencies here
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.androidx.datastore.preferences)
-            implementation("com.squareup.okio:okio:3.9.1")
+
+            // A multiplatform library by Square that offers support for Base64 encoding and decoding.
+            //implementation("com.squareup.okio:okio:3.9.1")
+
+            implementation(cryptographyLibs.core)
+            implementation(cryptographyLibs.provider.base)
+        }
+        iosMain.dependencies {
+            implementation(cryptographyLibs.provider.openssl3.prebuilt)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)

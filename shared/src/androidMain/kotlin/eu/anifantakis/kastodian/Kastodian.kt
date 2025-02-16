@@ -4,23 +4,36 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStoreFile
-import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import dev.whyoleg.cryptography.CryptographyProvider
+import dev.whyoleg.cryptography.algorithms.AES
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
+
+@OptIn(ExperimentalEncodingApi::class)
+private fun encodeBase64(bytes: ByteArray): String = Base64.encode(bytes)
+
+@OptIn(ExperimentalEncodingApi::class)
+private fun decodeBase64(encoded: String): ByteArray = Base64.decode(encoded)
 
 actual class Kastodian(private val context: Context) {
 
     @PublishedApi
     internal val json = Json { ignoreUnknownKeys = true }
 
+    // Create a DataStore for our preferences.
     @PublishedApi
     internal val dataStore: DataStore<Preferences> = PreferenceDataStoreFactory.create(
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
-        produceFile = { context.preferencesDataStoreFile("encrypted_datastore") }
+        produceFile = { context.preferencesDataStoreFile("kastodian_datastore") }
     )
+
+    // ----- Unencrypted Storage Helpers -----
 
     @PublishedApi
     internal suspend inline fun <reified T> getUnencrypted(key: String, defaultValue: T): T {
@@ -31,7 +44,7 @@ actual class Kastodian(private val context: Context) {
             is Long -> longPreferencesKey(key)
             is String -> stringPreferencesKey(key)
             is Double -> doublePreferencesKey(key)
-            else -> stringPreferencesKey(key) // complex objects stored as JSON
+            else -> stringPreferencesKey(key)
         } as Preferences.Key<Any>
 
         return dataStore.data.map { preferences ->
@@ -94,9 +107,7 @@ actual class Kastodian(private val context: Context) {
                 }
             }
             is String -> value
-            else -> {
-                json.encodeToString(serializer<T>(), value)
-            }
+            else -> json.encodeToString(serializer<T>(), value)
         }
 
         dataStore.updateData { preferences ->
@@ -106,8 +117,77 @@ actual class Kastodian(private val context: Context) {
         }
     }
 
+    // ----- Encrypted Storage Helpers -----
+    // We store the symmetric key and encrypted ciphertext as Base64 strings.
+    private fun symmetricPrefKey(id: String) = stringPreferencesKey("symmetric_$id")
+    private fun encryptedPrefKey(key: String) = stringPreferencesKey("encrypted_$key")
+
+    // Retrieve an existing symmetric key or generate a new one.
+    // In production you’d use the Android Keystore, but here we persist it in DataStore.
+    suspend fun getOrCreateSymmetricKey(id: String, aesGcm: AES.GCM): AES.GCM.Key {
+        val storedKeyBase64: String? = dataStore.data.map { it[symmetricPrefKey(id)] }.first()
+        return if (storedKeyBase64 != null) {
+            val encoded = decodeBase64(storedKeyBase64)
+            aesGcm.keyDecoder().decodeFromByteArray(AES.Key.Format.RAW, encoded)
+        } else {
+            val newKey = aesGcm.keyGenerator(AES.Key.Size.B256).generateKey()
+            val newKeyEncoded = newKey.encodeToByteArray(AES.Key.Format.RAW)
+            val encodedKeyBase64 = encodeBase64(newKeyEncoded)
+            dataStore.updateData { preferences ->
+                preferences.toMutablePreferences().apply {
+                    this[symmetricPrefKey(id)] = encodedKeyBase64
+                }
+            }
+            newKey
+        }
+    }
+
+    suspend fun storeEncryptedData(key: String, data: ByteArray) {
+        val encoded = encodeBase64(data)
+        dataStore.updateData { preferences ->
+            preferences.toMutablePreferences().apply {
+                this[encryptedPrefKey(key)] = encoded
+            }
+        }
+    }
+
+    suspend fun loadEncryptedData(key: String): ByteArray? {
+        val stored = dataStore.data.map { it[encryptedPrefKey(key)] }.first()
+        return stored?.let { decodeBase64(it) }
+    }
+
+    suspend inline fun <reified T> putEncrypted(key: String, value: T) {
+        // Serialize the value to JSON and get plaintext bytes.
+        val jsonString = json.encodeToString(value)
+        val plaintext = jsonString.encodeToByteArray()
+
+        val provider = CryptographyProvider.Default
+        val aesGcm = provider.get(AES.GCM)
+        val symmetricKey = getOrCreateSymmetricKey(key, aesGcm)
+        val cipher = symmetricKey.cipher()
+        // Encrypting returns a byte array that includes the nonce.
+        val ciphertext = cipher.encrypt(plaintext = plaintext)
+
+        storeEncryptedData(key, ciphertext)
+    }
+
+    suspend inline fun <reified T> getEncrypted(key: String, defaultValue: T): T {
+        val ciphertext = loadEncryptedData(key) ?: return defaultValue
+        val provider = CryptographyProvider.Default
+        val aesGcm = provider.get(AES.GCM)
+        val symmetricKey = getOrCreateSymmetricKey(key, aesGcm)
+        val cipher = symmetricKey.cipher()
+        val decryptedBytes = cipher.decrypt(ciphertext = ciphertext)
+        val jsonString = decryptedBytes.decodeToString()
+        return json.decodeFromString(serializer<T>(), jsonString)
+    }
+
     suspend inline fun <reified T> get(key: String, defaultValue: T, encrypted: Boolean = true): T {
-        return getUnencrypted(key, defaultValue)
+        return if (encrypted) {
+            getEncrypted(key, defaultValue)
+        } else {
+            getUnencrypted(key, defaultValue)
+        }
     }
 
     actual inline fun <reified T> getDirect(key: String, defaultValue: T, encrypted: Boolean): T {
@@ -117,7 +197,11 @@ actual class Kastodian(private val context: Context) {
     }
 
     suspend inline fun <reified T> put(key: String, value: T, encrypted: Boolean = true) {
-        putUnencrypted(key, value)
+        if (encrypted) {
+            putEncrypted(key, value)
+        } else {
+            putUnencrypted(key, value)
+        }
     }
 
     actual inline fun <reified T> putDirect(key: String, value: T, encrypted: Boolean) {

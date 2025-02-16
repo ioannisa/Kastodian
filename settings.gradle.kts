@@ -4,6 +4,7 @@ pluginManagement {
         google()
         gradlePluginPortal()
         mavenCentral()
+        maven("https://jitpack.io")
     }
 }
 
@@ -12,6 +13,13 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         mavenLocal()
+        maven("https://jitpack.io")
+    }
+
+    versionCatalogs {
+        create("cryptographyLibs") {
+            from("dev.whyoleg.cryptography:cryptography-version-catalog:0.4.0")
+        }
     }
 }
 
