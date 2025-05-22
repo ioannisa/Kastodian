@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "eu.anifantakis.kastodian"
-version = "0.0.2"
+version = "0.0.3"
 
 kotlin {
     androidTarget {
@@ -62,6 +62,11 @@ kotlin {
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
+
+        // don't show warning on expect/actual classes
+        compilerOptions {
+            freeCompilerArgs.add("-Xexpect-actual-classes")
+        }
     }
 }
 
@@ -79,7 +84,7 @@ publishing {
 
 android {
     namespace = "eu.anifantakis.kastodian"
-    compileSdk = 34
+    compileSdk = 35
     defaultConfig {
         minSdk = 24
     }
